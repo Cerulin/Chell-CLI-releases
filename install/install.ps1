@@ -6,6 +6,7 @@
 #
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $GITHUB_REPO = "Cerulin/Chell-CLI-Releases"
 $INSTALL_DIR = "$env:USERPROFILE\.chell"
