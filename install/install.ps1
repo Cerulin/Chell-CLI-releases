@@ -2,73 +2,64 @@
 # Chell CLI Installer for Windows (PowerShell)
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/Cerulin/Chell-CLI-Releases/main/install/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Cerulin/Chell-CLI-releases/main/install/install.ps1 | iex
 #
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$GITHUB_REPO = "Cerulin/Chell-CLI-Releases"
+$GITHUB_REPO = "Cerulin/Chell-CLI-releases"
 $INSTALL_DIR = "$env:USERPROFILE\.chell"
 $BIN_DIR = "$INSTALL_DIR\bin"
+$BINARY_NAME = "chell-windows-amd64.exe"
 
-function Write-Info {
-    param([string]$Message)
-    Write-Host "[INFO] " -ForegroundColor Blue -NoNewline
-    Write-Host $Message
-}
-
-function Write-Success {
-    param([string]$Message)
-    Write-Host "[OK] " -ForegroundColor Green -NoNewline
-    Write-Host $Message
-}
-
-function Write-Warn {
-    param([string]$Message)
-    Write-Host "[WARN] " -ForegroundColor Yellow -NoNewline
-    Write-Host $Message
-}
-
-function Write-Error-Exit {
-    param([string]$Message)
-    Write-Host "[ERROR] " -ForegroundColor Red -NoNewline
-    Write-Host $Message
-    exit 1
-}
-
-function Get-Platform {
-    if ([Environment]::Is64BitOperatingSystem) {
-        return "win32-x64"
-    } else {
-        Write-Error-Exit "Chell CLI does not support 32-bit Windows. Please use a 64-bit version."
-    }
-}
+function Write-Info    { param([string]$Msg) Write-Host "[INFO] " -ForegroundColor Blue -NoNewline; Write-Host $Msg }
+function Write-Success { param([string]$Msg) Write-Host "[OK] " -ForegroundColor Green -NoNewline; Write-Host $Msg }
+function Write-Warn    { param([string]$Msg) Write-Host "[WARN] " -ForegroundColor Yellow -NoNewline; Write-Host $Msg }
+function Write-Fatal   { param([string]$Msg) Write-Host "[ERROR] " -ForegroundColor Red -NoNewline; Write-Host $Msg; exit 1 }
 
 function Get-LatestVersion {
     try {
         $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$GITHUB_REPO/releases/latest" -UseBasicParsing
-        $version = $response.tag_name -replace '^v', ''
-        return $version
+        return $response.tag_name
     } catch {
-        Write-Error-Exit "Failed to fetch latest version from GitHub: $_"
+        Write-Fatal "Failed to fetch latest version: $_"
     }
 }
 
-function Get-FileChecksum {
-    param([string]$FilePath)
-    $hash = Get-FileHash -Path $FilePath -Algorithm SHA256
-    return $hash.Hash.ToLower()
+function Get-InstalledVersion {
+    $chellPath = Join-Path $BIN_DIR "chell.exe"
+    if (Test-Path $chellPath) {
+        try {
+            $output = & $chellPath --version 2>$null
+            if ($output -match '(v?\d+\.\d+\.\d+)') {
+                return $matches[1]
+            }
+        } catch {}
+    }
+    return $null
+}
+
+function Uninstall-NpmChell {
+    if (Get-Command npm -ErrorAction SilentlyContinue) {
+        $npmList = npm list -g @cerulin/chell 2>$null
+        if ($LASTEXITCODE -eq 0 -and $npmList -match "chell") {
+            Write-Warn "Found old npm version of chell. Uninstalling..."
+            npm uninstall -g @cerulin/chell 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Success "Removed npm @cerulin/chell"
+            } else {
+                Write-Warn "Could not remove npm @cerulin/chell. Run manually: npm uninstall -g @cerulin/chell"
+            }
+        }
+    }
 }
 
 function Add-ToPath {
     $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-
     if ($currentPath -notlike "*$BIN_DIR*") {
-        $newPath = "$BIN_DIR;$currentPath"
-        [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+        [Environment]::SetEnvironmentVariable("PATH", "$BIN_DIR;$currentPath", "User")
         Write-Success "Added $BIN_DIR to user PATH"
-        Write-Info "Restart your terminal for PATH changes to take effect"
     } else {
         Write-Info "$BIN_DIR already in PATH"
     }
@@ -80,72 +71,79 @@ function Main {
     Write-Host "================================"
     Write-Host ""
 
-    # Detect platform
-    $platform = Get-Platform
-    Write-Info "Detected platform: $platform"
+    # Check for old npm version
+    Uninstall-NpmChell
+
+    Write-Info "Platform: windows-amd64"
 
     # Get latest version
     Write-Info "Fetching latest version..."
     $version = Get-LatestVersion
-    Write-Success "Latest version: v$version"
+    if (-not $version) { Write-Fatal "Failed to get latest version" }
+    Write-Success "Latest version: $version"
 
-    # Create temp directory
+    # Check if already up to date
+    $installed = Get-InstalledVersion
+    if ($installed) {
+        $installedClean = $installed -replace '^v', ''
+        $versionClean = $version -replace '^v', ''
+        if ($installedClean -eq $versionClean) {
+            Write-Success "Already up to date ($version)"
+            return
+        }
+        Write-Info "Upgrading from $installed to $version"
+    }
+
+    # Temp directory
     $tempDir = Join-Path $env:TEMP "chell-install-$(Get-Random)"
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
     try {
-        # Download manifest
-        Write-Info "Downloading manifest..."
-        $manifestUrl = "https://github.com/$GITHUB_REPO/releases/download/v$version/manifest.json"
-        $manifestPath = Join-Path $tempDir "manifest.json"
-        Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing
-
-        # Parse manifest
-        $manifest = Get-Content $manifestPath | ConvertFrom-Json
-        $fileInfo = $manifest.files.$platform
-
-        if (-not $fileInfo) {
-            Write-Error-Exit "No binary available for platform: $platform"
-        }
-
-        $filename = $fileInfo.filename
-        $expectedChecksum = $fileInfo.sha256
+        $baseUrl = "https://github.com/$GITHUB_REPO/releases/download/$version"
 
         # Download binary
-        Write-Info "Downloading chell binary..."
-        $binaryUrl = "https://github.com/$GITHUB_REPO/releases/download/v$version/$filename"
-        $binaryPath = Join-Path $tempDir "chell.exe"
-        Invoke-WebRequest -Uri $binaryUrl -OutFile $binaryPath -UseBasicParsing
+        Write-Info "Downloading $BINARY_NAME..."
+        Invoke-WebRequest -Uri "$baseUrl/$BINARY_NAME" -OutFile "$tempDir\chell.exe" -UseBasicParsing
 
         # Verify checksum
         Write-Info "Verifying checksum..."
-        $actualChecksum = Get-FileChecksum -FilePath $binaryPath
-        if ($actualChecksum -ne $expectedChecksum) {
-            Write-Error-Exit "Checksum verification failed!`n  Expected: $expectedChecksum`n  Got:      $actualChecksum"
+        Invoke-WebRequest -Uri "$baseUrl/checksums.sha256" -OutFile "$tempDir\checksums.sha256" -UseBasicParsing
+
+        $checksumLine = Get-Content "$tempDir\checksums.sha256" | Where-Object { $_ -match $BINARY_NAME }
+        if ($checksumLine) {
+            $expected = ($checksumLine -split '\s+')[0]
+            $actual = (Get-FileHash -Path "$tempDir\chell.exe" -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expected) {
+                Write-Fatal "Checksum mismatch!`n  Expected: $expected`n  Got:      $actual"
+            }
+            Write-Success "Checksum verified"
+        } else {
+            Write-Warn "Could not verify checksum"
         }
-        Write-Success "Checksum verified"
 
         # Install
         Write-Info "Installing to $BIN_DIR..."
         if (-not (Test-Path $BIN_DIR)) {
             New-Item -ItemType Directory -Path $BIN_DIR -Force | Out-Null
         }
+        Move-Item -Path "$tempDir\chell.exe" -Destination "$BIN_DIR\chell.exe" -Force
+        Write-Success "Installed chell $version"
 
-        $destPath = Join-Path $BIN_DIR "chell.exe"
-        Move-Item -Path $binaryPath -Destination $destPath -Force
-        Write-Success "Binary installed"
-
-        # Add to PATH
+        # PATH
         Add-ToPath
 
         Write-Host ""
         Write-Host "Installation complete!" -ForegroundColor Green
         Write-Host ""
-        Write-Host "To get started, restart your terminal and run: chell"
+        if ($installed) {
+            Write-Host "  Upgraded: $installed -> $version"
+        }
+        Write-Host "  Binary: $BIN_DIR\chell.exe"
+        Write-Host ""
+        Write-Host "Restart your terminal, then run: chell"
         Write-Host ""
 
     } finally {
-        # Cleanup
         if (Test-Path $tempDir) {
             Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         }
