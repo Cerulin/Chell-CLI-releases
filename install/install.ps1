@@ -126,7 +126,14 @@ function Main {
         if (-not (Test-Path $BIN_DIR)) {
             New-Item -ItemType Directory -Path $BIN_DIR -Force | Out-Null
         }
-        Move-Item -Path "$tempDir\chell.exe" -Destination "$BIN_DIR\chell.exe" -Force
+        # Handle updating a running executable (Windows locks running exes)
+        $targetExe = "$BIN_DIR\chell.exe"
+        $backupExe = "$BIN_DIR\chell.exe.old"
+        if (Test-Path $targetExe) {
+            if (Test-Path $backupExe) { Remove-Item $backupExe -Force -ErrorAction SilentlyContinue }
+            Rename-Item -Path $targetExe -NewName "chell.exe.old" -Force -ErrorAction SilentlyContinue
+        }
+        Move-Item -Path "$tempDir\chell.exe" -Destination $targetExe -Force
         Write-Success "Installed chell $version"
 
         # PATH
